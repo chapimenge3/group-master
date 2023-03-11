@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, Dispatcher, Defaults, CallbackQueryHandler, ChatJoinRequestHandler
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Bot
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, Dispatcher, Defaults, CallbackQueryHandler, ChatJoinRequestHandler, PreCheckoutQueryHandler
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Bot, LabeledPrice
+
 from constants import *
 
 from models import group, user, transaction, membership
@@ -16,6 +17,7 @@ def waiting_message_wrapper(func):
             text='Please wait...',
         )
         error = None
+        print('calling function')
         try:
             func(update, context)
         except Exception as e:
@@ -39,6 +41,7 @@ def verify_payment(update, context):
         return
 
     verify_chapa = chapa.verify(cmd)
+    print(verify_chapa)
     if verify_chapa.get('status') == 'success' and verify_chapa['data']['status'] == 'success':
         transaction.update_transaction(cmd, status='success')
         membership.create_membership(
@@ -179,6 +182,54 @@ def select_payment_method(update, context):
         query.edit_message_text(text='Payment failed')
         return
     # TODO: add other payment methods
+    else:
+        title = "Payment Example"
+        description = "Payment Example using python-telegram-bot"
+        payload = str(txt.transaction_id)
+        provider_token = STRIPE_SECRET
+        currency = 'ETB'
+        price = 100
+
+        prices = [LabeledPrice("Test", price * 100)]
+        context.bot.send_invoice(
+            user_detail.user_id, title, description, payload, provider_token, currency, prices
+        )
+
+
+def precheckout_callback(update, context):
+    """Answers the PreQecheckoutQuery"""
+    query = update.pre_checkout_query
+    transaction_details = transaction.get_transaction(query.invoice_payload)
+    # check the payload, is this from your bot?
+    if not transaction_details:
+        # answer False pre_checkout_query
+        query.answer(ok=False, error_message="Something went wrong...")
+    else:
+        query.answer(ok=True)
+
+
+def successful_payment_callback(update, context):
+    print(update, context)
+    tx_ref = update.message.successful_payment.invoice_payload
+    transaction_details = transaction.get_transaction(tx_ref)
+    transaction.update_transaction(tx_ref, status='success')
+    membership.create_membership(
+        user=transaction_details.user,
+        group=transaction_details.group,
+        start_date=datetime.now(),
+        end_date=datetime.now() + timedelta(days=transaction_details.group.duration),
+        status='active',
+        transaction=transaction_details,
+    )
+    keyboard = [[
+        InlineKeyboardButton('Join', url=INVITE_LINK)
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text(INVITE_MESSAGE.format(
+        link=INVITE_LINK),
+        parse_mode='HTML',
+        reply_markup=reply_markup,
+    )
 
 
 def main():
@@ -196,6 +247,10 @@ def main():
     # chat join request handler
     dispatcher.add_handler(
         ChatJoinRequestHandler(callback=chat_join_request, pass_chat_data=True))
+
+    dispatcher.add_handler(PreCheckoutQueryHandler(precheckout_callback))
+    dispatcher.add_handler(MessageHandler(
+        Filters.successful_payment, successful_payment_callback))
 
     updater.start_polling()
     updater.idle()
